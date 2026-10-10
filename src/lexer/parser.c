@@ -34,6 +34,9 @@ struct NodeList {
 struct Param {
     char *type;
     char *name;
+    int line;
+    int column;
+    int is_array;
     Param *next;
 };
 
@@ -46,6 +49,8 @@ struct Node {
     Node *third;
     NodeList *items;
     Param *params;
+    int token_start;
+    int token_end;
 };
 
 typedef struct {
@@ -83,6 +88,14 @@ static Node *new_binary(NodeKind kind, const char *op, Node *left, Node *right) 
     return node;
 }
 
+static Node *set_span(Node *node, int token_start, int token_end) {
+    if (node != NULL) {
+        node->token_start = token_start;
+        node->token_end = token_end;
+    }
+    return node;
+}
+
 static NodeList *append_node(NodeList **head, NodeList **tail, Node *node) {
     NodeList *item = (NodeList *)malloc(sizeof(NodeList));
     if (item == NULL) return NULL;
@@ -94,11 +107,15 @@ static NodeList *append_node(NodeList **head, NodeList **tail, Node *node) {
     return item;
 }
 
-static Param *append_param(Param **head, Param **tail, char *type, char *name) {
+static Param *append_param(Param **head, Param **tail, char *type, char *name,
+                           int line, int column, int is_array) {
     Param *param = (Param *)malloc(sizeof(Param));
     if (param == NULL) return NULL;
     param->type = type;
     param->name = name;
+    param->line = line;
+    param->column = column;
+    param->is_array = is_array;
     param->next = NULL;
     if (*tail != NULL) (*tail)->next = param;
     else *head = param;
@@ -168,6 +185,7 @@ static char *parse_type(Parser *parser) {
 }
 
 static Node *parse_var_rest(Parser *parser, char *type, char *name) {
+    int token_start = parser->pos - 2;
     Node *node = new_node(N_VARDECL);
     if (node == NULL) return NULL;
     node->a = type;
@@ -182,39 +200,48 @@ static Node *parse_var_rest(Parser *parser, char *type, char *name) {
         node->right = parse_expr(parser);
     }
     expect(parser, "SEMICOLON", NULL);
-    return node;
+    return set_span(node, token_start, parser->pos);
 }
 
 static Param *parse_param(Parser *parser) {
     char *type = parse_type(parser);
+    Token *name_token = current(parser);
     char *name = copy_text(expect(parser, "IDENT", "identificador")->lexema);
+    int is_array = 0;
     if (check(parser, "LBRACKET")) {
+        is_array = 1;
         advance_token(parser);
-        parse_expr(parser);
+        if (!check(parser, "RBRACKET")) parse_expr(parser);
         expect(parser, "RBRACKET", NULL);
     }
     Param *param = (Param *)malloc(sizeof(Param));
     if (param != NULL) {
         param->type = type;
         param->name = name;
+        param->line = name_token->linha;
+        param->column = name_token->coluna;
+        param->is_array = is_array;
         param->next = NULL;
     }
     return param;
 }
 
 static Node *parse_function(Parser *parser, char *type, char *name) {
+    int token_start = parser->pos - 2;
     Node *node = new_node(N_FUNCTION);
     Param *head = NULL;
     Param *tail = NULL;
     expect(parser, "LPAREN", NULL);
     if (!check(parser, "RPAREN")) {
         Param *param = parse_param(parser);
-        if (param != NULL) append_param(&head, &tail, param->type, param->name);
+        if (param != NULL) append_param(&head, &tail, param->type, param->name,
+                        param->line, param->column, param->is_array);
         free(param);
         while (check(parser, "COMMA")) {
             advance_token(parser);
             param = parse_param(parser);
-            if (param != NULL) append_param(&head, &tail, param->type, param->name);
+            if (param != NULL) append_param(&head, &tail, param->type, param->name,
+                                            param->line, param->column, param->is_array);
             free(param);
         }
     }
@@ -227,7 +254,7 @@ static Node *parse_function(Parser *parser, char *type, char *name) {
     } else {
         parse_block(parser);
     }
-    return node;
+    return set_span(node, token_start, parser->pos);
 }
 
 static Node *parse_top_declaration(Parser *parser) {
@@ -237,14 +264,16 @@ static Node *parse_top_declaration(Parser *parser) {
         if (check(parser, "LPAREN")) return parse_function(parser, type, name);
         return parse_var_rest(parser, type, name);
     }
+    int token_start = parser->pos;
     Node *expr = parse_expr(parser);
     expect(parser, "SEMICOLON", NULL);
     Node *node = new_node(N_EXPRSTMT);
     if (node != NULL) node->left = expr;
-    return node;
+    return set_span(node, token_start, parser->pos);
 }
 
 static Node *parse_print_or_read(Parser *parser, const char *token_type, const char *name) {
+    int token_start = parser->pos;
     Node *node = new_node(N_EXPRSTMT);
     Node *call = new_node(N_CALL);
     NodeList *head = NULL;
@@ -263,12 +292,15 @@ static Node *parse_print_or_read(Parser *parser, const char *token_type, const c
     if (call != NULL) {
         call->left = new_text_node(N_ID, name);
         call->items = head;
+        set_span(call->left, token_start, token_start + 1);
+        set_span(call, token_start, parser->pos);
     }
     if (node != NULL) node->left = call;
-    return node;
+    return set_span(node, token_start, parser->pos);
 }
 
 static Node *parse_if(Parser *parser) {
+    int token_start = parser->pos;
     Node *node = new_node(N_IF);
     expect(parser, "IF", NULL);
     expect(parser, "LPAREN", NULL);
@@ -285,10 +317,11 @@ static Node *parse_if(Parser *parser) {
         node->right = then_node;
         node->third = else_node;
     }
-    return node;
+    return set_span(node, token_start, parser->pos);
 }
 
 static Node *parse_while(Parser *parser) {
+    int token_start = parser->pos;
     Node *node = new_node(N_WHILE);
     expect(parser, "WHILE", NULL);
     expect(parser, "LPAREN", NULL);
@@ -300,10 +333,11 @@ static Node *parse_while(Parser *parser) {
     } else {
         parse_stmt(parser);
     }
-    return node;
+    return set_span(node, token_start, parser->pos);
 }
 
 static Node *parse_return(Parser *parser) {
+    int token_start = parser->pos;
     Node *node = new_node(N_RETURN);
     expect(parser, "RETURN", NULL);
     if (!check(parser, "SEMICOLON")) {
@@ -311,7 +345,7 @@ static Node *parse_return(Parser *parser) {
         else parse_expr(parser);
     }
     expect(parser, "SEMICOLON", NULL);
-    return node;
+    return set_span(node, token_start, parser->pos);
 }
 
 static Node *parse_stmt(Parser *parser) {
@@ -326,14 +360,16 @@ static Node *parse_stmt(Parser *parser) {
         char *name = copy_text(expect(parser, "IDENT", "identificador")->lexema);
         return parse_var_rest(parser, type, name);
     }
+    int token_start = parser->pos;
     Node *node = new_node(N_EXPRSTMT);
     if (node != NULL) node->left = parse_expr(parser);
     else parse_expr(parser);
     expect(parser, "SEMICOLON", NULL);
-    return node;
+    return set_span(node, token_start, parser->pos);
 }
 
 static Node *parse_block(Parser *parser) {
+    int token_start = parser->pos;
     Node *node = new_node(N_BLOCK);
     NodeList *head = NULL;
     NodeList *tail = NULL;
@@ -343,7 +379,7 @@ static Node *parse_block(Parser *parser) {
     }
     expect(parser, "RBRACE", NULL);
     if (node != NULL) node->items = head;
-    return node;
+    return set_span(node, token_start, parser->pos);
 }
 
 static Node *parse_assign(Parser *parser);
@@ -361,7 +397,9 @@ static Node *parse_binary(Parser *parser, Node *(*next)(Parser *), const char *c
         if (!found) break;
         char *op = copy_text(advance_token(parser)->lexema);
         Node *right = next(parser);
-        left = new_binary(N_BINARY, op, left, right);
+        int token_start = left != NULL ? left->token_start : parser->pos;
+        int token_end = parser->pos;
+        left = set_span(new_binary(N_BINARY, op, left, right), token_start, token_end);
         free(op);
     }
     return left;
@@ -409,10 +447,11 @@ static Node *parse_mult(Parser *parser) {
 
 static Node *parse_unary(Parser *parser) {
     if (check(parser, "MINUS") || check(parser, "NOT")) {
+        int token_start = parser->pos;
         char *op = copy_text(advance_token(parser)->lexema);
         Node *node = new_binary(N_UNARY, op, parse_unary(parser), NULL);
         free(op);
-        return node;
+        return set_span(node, token_start, parser->pos);
     }
     return parse_postfix(parser);
 }
@@ -421,11 +460,13 @@ static Node *parse_postfix(Parser *parser) {
     Node *expr = parse_primary(parser);
     while (!parser->failed) {
         if (check(parser, "LBRACKET")) {
+            int token_start = expr != NULL ? expr->token_start : parser->pos;
             advance_token(parser);
             Node *index = parse_expr(parser);
             expect(parser, "RBRACKET", NULL);
-            expr = new_binary(N_INDEX, "", expr, index);
+            expr = set_span(new_binary(N_INDEX, "", expr, index), token_start, parser->pos);
         } else if (check(parser, "LPAREN")) {
+            int token_start = expr != NULL ? expr->token_start : parser->pos;
             NodeList *head = NULL;
             NodeList *tail = NULL;
             advance_token(parser);
@@ -442,7 +483,7 @@ static Node *parse_postfix(Parser *parser) {
                 call->left = expr;
                 call->items = head;
             }
-            expr = call;
+            expr = set_span(call, token_start, parser->pos);
         } else {
             break;
         }
@@ -451,40 +492,41 @@ static Node *parse_postfix(Parser *parser) {
 }
 
 static Node *parse_primary(Parser *parser) {
+    int token_start = parser->pos;
     Token *token = current(parser);
     if (strcmp(token->tipo, "INT_LIT") == 0) {
         advance_token(parser);
         Node *node = new_node(N_LIT);
         if (node != NULL) { node->a = copy_text("int"); node->b = copy_text(token->lexema); }
-        return node;
+        return set_span(node, token_start, parser->pos);
     }
     if (strcmp(token->tipo, "FLOAT_LIT") == 0) {
         advance_token(parser);
         Node *node = new_node(N_LIT);
         if (node != NULL) { node->a = copy_text("real"); node->b = copy_text(token->lexema); }
-        return node;
+        return set_span(node, token_start, parser->pos);
     }
     if (strcmp(token->tipo, "CHAR_LIT") == 0) {
         advance_token(parser);
         Node *node = new_node(N_LIT);
         if (node != NULL) { node->a = copy_text("char"); node->b = copy_text(token->atributo); }
-        return node;
+        return set_span(node, token_start, parser->pos);
     }
     if (strcmp(token->tipo, "STRING_LIT") == 0) {
         advance_token(parser);
         Node *node = new_node(N_LIT);
         if (node != NULL) { node->a = copy_text("string"); node->b = copy_text(token->atributo); }
-        return node;
+        return set_span(node, token_start, parser->pos);
     }
     if (strcmp(token->tipo, "TRUE") == 0 || strcmp(token->tipo, "FALSE") == 0) {
         advance_token(parser);
         Node *node = new_node(N_LIT);
         if (node != NULL) { node->a = copy_text("bool"); node->b = copy_text(token->tipo[0] == 'T' ? "true" : "false"); }
-        return node;
+        return set_span(node, token_start, parser->pos);
     }
     if (strcmp(token->tipo, "IDENT") == 0) {
         advance_token(parser);
-        return new_text_node(N_ID, token->lexema);
+        return set_span(new_text_node(N_ID, token->lexema), token_start, parser->pos);
     }
     if (strcmp(token->tipo, "LPAREN") == 0) {
         advance_token(parser);
@@ -500,7 +542,9 @@ static Node *parse_assign(Parser *parser) {
     Node *left = parse_or(parser);
     if (check(parser, "ASSIGN")) {
         advance_token(parser);
-        return new_binary(N_ASSIGN, "", left, parse_assign(parser));
+        Node *right = parse_assign(parser);
+        int token_start = left != NULL ? left->token_start : parser->pos;
+        return set_span(new_binary(N_ASSIGN, "", left, right), token_start, parser->pos);
     }
     return left;
 }
@@ -510,6 +554,7 @@ static Node *parse_expr(Parser *parser) {
 }
 
 static Node *parse_program(Parser *parser) {
+    int token_start = parser->pos;
     Node *node = new_node(N_PROGRAM);
     NodeList *head = NULL;
     NodeList *tail = NULL;
@@ -517,7 +562,7 @@ static Node *parse_program(Parser *parser) {
         append_node(&head, &tail, parse_top_declaration(parser));
     }
     if (node != NULL) node->items = head;
-    return node;
+    return set_span(node, token_start, parser->pos);
 }
 
 static void print_list(NodeList *items, const char *separator);
@@ -580,6 +625,7 @@ static char *read_file(const char *path, int *size) {
     return buffer;
 }
 
+#ifndef PARSER_SEMANTIC_LIBRARY
 int main(int argc, char **argv) {
     char *code;
     int size;
@@ -609,3 +655,4 @@ int main(int argc, char **argv) {
     free(code);
     return 0;
 }
+#endif
